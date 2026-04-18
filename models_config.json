@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+      "name": "Venice: Uncensored (free)",
+      "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+      "provider": "openrouter"
+    },
+    {
+      "id": "z-ai/glm-4.5-air:free",
+      "name": "Z.ai: GLM 4.5 Air (free)",
+      "model": "z-ai/glm-4.5-air:free",
+      "provider": "openrouter"
+    },
+    {
+      "id": "moonshotai/kimi-k2.5",
+      "name": "MoonshotAI: Kimi K2.5",
+      "model": "moonshotai/kimi-k2.5",
+      "provider": "openrouter"
+    }
+  ]
+}
