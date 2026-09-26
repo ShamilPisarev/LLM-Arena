@@ -1,28 +1,53 @@
 import asyncio
 import json
 import os
+import time
+from pathlib import Path
 from typing import AsyncGenerator
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 
 app = FastAPI()
+ROOT = Path(__file__).resolve().parent
+_catalog = []
+_catalog_time = 0.0
 
 
 def load_config() -> dict:
-    with open("models_config.json") as f:
+    with open(ROOT / "models_config.json") as f:
         return json.load(f)
 
 
 def save_config(config: dict) -> None:
-    with open("models_config.json", "w") as f:
+    with open(ROOT / "models_config.json", "w") as f:
         json.dump(config, f, indent=2)
 
 
 # ── Model discovery ───────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    return {"app": "llm-arena"}
+
+
+@app.get("/api/openrouter-models")
+async def openrouter_models():
+    global _catalog, _catalog_time
+    if _catalog and time.monotonic() - _catalog_time < 300:
+        return {"data": _catalog}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get("https://openrouter.ai/api/v1/models")
+            response.raise_for_status()
+            _catalog = response.json()["data"]
+            _catalog_time = time.monotonic()
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise HTTPException(502, "Could not load OpenRouter model settings. Try again.") from exc
+    return {"data": _catalog}
 
 @app.get("/api/models")
 async def get_models():
@@ -92,12 +117,33 @@ class HistoryTurn(BaseModel):
     responses: dict[str, str]   # model_id -> assistant text
 
 
+class GenerationSettings(BaseModel):
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    max_tokens: int | None = Field(default=None, ge=1, strict=True)
+
+
 class CompareRequest(BaseModel):
     prompt: str
     history: list[HistoryTurn] = []
     models: list[dict]
     system_prompt: str = ""
     openrouter_key: str = ""
+    parameters: dict[str, GenerationSettings] = Field(default_factory=dict)
+
+
+def generation_options(settings: GenerationSettings, metadata: dict | None = None) -> dict:
+    options = settings.model_dump(exclude_none=True)
+    if metadata is not None:
+        supported = metadata.get("supported_parameters")
+        if supported is not None:
+            unsupported = set(options) - set(supported)
+            if unsupported:
+                raise HTTPException(422, "Unsupported settings: " + ", ".join(sorted(unsupported)))
+        limit = (metadata.get("top_provider") or {}).get("max_completion_tokens")
+        if limit and options.get("max_tokens", 0) > limit:
+            raise HTTPException(422, f"Output limit exceeds the advertised model maximum ({limit} tokens).")
+    return options
 
 
 def build_messages(model_id: str, system_prompt: str, history: list[HistoryTurn], prompt: str) -> list:
@@ -131,10 +177,10 @@ def make_client(cfg: dict, openrouter_key: str) -> AsyncOpenAI | None:
     return None
 
 
-async def stream_model(client, model_id, model_str, messages, queue):
+async def stream_model(client, model_id, model_str, messages, queue, options=None):
     try:
         stream = await client.chat.completions.create(
-            model=model_str, messages=messages, stream=True, max_tokens=4096,
+            model=model_str, messages=messages, stream=True, **(options or {}),
         )
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
@@ -148,6 +194,18 @@ async def stream_model(client, model_id, model_str, messages, queue):
 @app.post("/api/compare")
 async def compare(request: CompareRequest):
     queue: asyncio.Queue = asyncio.Queue()
+    options_by_id = {}
+    for cfg in request.models:
+        settings = request.parameters.get(cfg["id"], GenerationSettings())
+        metadata = None
+        if cfg["provider"] == "openrouter" and settings.model_dump(exclude_none=True):
+            catalog = (await openrouter_models())["data"]
+            metadata = next((m for m in catalog if m["id"] == cfg["model"]), None)
+            if metadata is None:
+                raise HTTPException(422, "Model settings unavailable; use model defaults or choose a current model.")
+        options_by_id[cfg["id"]] = generation_options(settings, metadata)
+        if cfg["provider"] == "openrouter" and options_by_id[cfg["id"]]:
+            options_by_id[cfg["id"]]["extra_body"] = {"provider": {"require_parameters": True}}
 
     async def generate() -> AsyncGenerator[str, None]:
         tasks = []
@@ -157,7 +215,7 @@ async def compare(request: CompareRequest):
                 continue
             msgs = build_messages(cfg["id"], request.system_prompt, request.history, request.prompt)
             tasks.append(asyncio.create_task(
-                stream_model(client, cfg["id"], cfg["model"], msgs, queue)
+                stream_model(client, cfg["id"], cfg["model"], msgs, queue, options_by_id[cfg["id"]])
             ))
         if not tasks:
             return
@@ -178,4 +236,4 @@ async def compare(request: CompareRequest):
 
 @app.get("/")
 async def root():
-    return FileResponse("index.html")
+    return FileResponse(ROOT / "index.html")

@@ -13,6 +13,8 @@ Compare responses from multiple LLMs side-by-side with a single prompt. Supports
 
 ## Quick Start
 
+**Windows:** double-click **Start LLM Arena.cmd** in this folder (or your local **LLM Arena** shortcut, if present). Machine-specific `.lnk` shortcuts are kept locally and excluded from Git. The launcher uses the existing project environment, or creates `.venv`, installs missing dependencies on first launch, and opens your browser when the server is ready. Python 3.10+ is required. Keep its terminal window open; close it or press Ctrl+C to stop. If port 8000 is occupied, it tries ports up to 8020.
+
 ```bash
 pip install -r requirements.txt
 uvicorn main:app --reload
@@ -41,6 +43,14 @@ Open **http://localhost:8000**
 2. Click **↻ Refresh local** — loaded models appear automatically
 
 ## Usage
+
+- **Chats** in the sidebar lists conversations saved automatically in this browser. Messages, partial responses, drafts, system prompts, selected models, and generation settings are restored when you reopen a chat.
+- **New chat** keeps the previous conversation. **Delete chat** deletes only the active chat after confirmation. Switching/deleting chats is disabled while a response is streaming.
+- History uses browser local storage, not a cloud account or a backup. Use the same browser/profile and URL (including hostname and port); clearing site data removes saved chats. Storage failures show a warning instead of claiming the chat was saved.
+
+- Click **Model settings** to set temperature, top-p, and output tokens separately for each selected model. Settings are saved in your browser.
+- Blank fields use model/provider defaults: the app omits those parameters entirely, including the former fixed 4,096-token cap. **Use model defaults**, then **Save**, clears overrides for the selected models.
+- OpenRouter's live catalog supplies published default values, supported controls, and advertised maximum output tokens. Missing defaults are labeled rather than guessed; unavailable model details allow defaults only. Provider/context limits still apply. Explicit overrides require a provider that supports them.
 
 - Select models via checkboxes in the sidebar
 - Type a prompt → **Send →** (or **Ctrl+Enter**)

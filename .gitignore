@@ -16,6 +16,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+*.lnk
 
 # IDE
 .vscode/

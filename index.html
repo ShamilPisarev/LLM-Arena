@@ -193,6 +193,25 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    .generation-modal { width: 620px; max-height: 85vh; overflow-y: auto; }
+    .generation-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 12px 0; }
+    .generation-card h3 { font-size: 13px; margin-bottom: 8px; overflow-wrap: anywhere; }
+    .generation-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .generation-fields label { display: block; font-size: 11px; color: var(--muted); }
+    .generation-fields input { width: 100%; margin-top: 5px; padding: 8px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 5px; }
+    .generation-fields input:disabled { opacity: .45; }
+    .generation-fields small { display: block; margin-top: 5px; line-height: 1.4; }
+    #send-error { color: var(--red); font-size: 12px; margin-top: 7px; }
+    @media (max-width: 600px) { .generation-fields { grid-template-columns: 1fr; } }
+    .chat-section { border-bottom: 1px solid var(--border); padding: 10px; max-height: 35%; display: flex; flex-direction: column; }
+    .chat-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 12px; }
+    #chat-list { overflow-y: auto; min-height: 36px; }
+    .chat-entry { display: block; width: 100%; text-align: left; background: none; color: var(--text); border: 1px solid transparent; border-radius: 5px; padding: 7px; cursor: pointer; margin-bottom: 3px; }
+    .chat-entry.active { background: var(--accent-dim); border-color: var(--accent); }
+    .chat-entry span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chat-entry small, #chat-status { color: var(--muted); font-size: 10px; }
+    #chat-status { padding-top: 6px; }
+    button:disabled { opacity: .45; cursor: default; }
   </style>
 </head>
 <body>
@@ -200,7 +219,9 @@
 <header>
   <h1>LLM <span>Arena</span></h1>
   <div class="hbtns">
-    <button class="hbtn danger" onclick="newConversation()">↺ New chat</button>
+    <button class="hbtn" onclick="openGeneration()">⚙ Model settings</button>
+    <button id="new-chat" class="hbtn" onclick="newConversation()">＋ New chat</button>
+    <button id="delete-chat" class="hbtn danger" onclick="deleteConversation()" disabled>Delete chat</button>
     <button class="hbtn" onclick="openSettings()">
       <div class="key-dot" id="key-dot"></div> API Key
     </button>
@@ -210,6 +231,11 @@
 <div class="layout">
   <!-- Sidebar -->
   <aside class="sidebar">
+    <section class="chat-section" aria-label="Chat history">
+      <div class="chat-heading"><strong>Chats</strong><span style="font-size:10px;color:var(--muted)">This browser</span></div>
+      <div id="chat-list"></div>
+      <div id="chat-status" role="status">Chats save automatically.</div>
+    </section>
     <div class="sidebar-top">
       <span>Models</span>
       <button class="refresh-btn" id="refresh-btn" onclick="refreshLocal()">↻ Refresh local</button>
@@ -243,7 +269,24 @@
       <div class="input-actions">
         <button class="run-btn" id="run-btn" onclick="runCompare()">Send →</button>
       </div>
+      <div id="send-error" role="alert"></div>
     </div>
+  </div>
+</div>
+
+<div class="overlay" id="generation-overlay" onclick="overlayClick(event,'generation-overlay')">
+  <div class="settings-modal generation-modal" role="dialog" aria-modal="true" aria-labelledby="generation-title">
+    <h2 class="modal-title" id="generation-title">Model settings</h2>
+    <p class="field-hint">Leave fields blank to use each model/provider's defaults. Values shown as placeholders are published defaults, not overrides. Output limits include reasoning tokens where applicable.</p>
+    <div id="generation-status" class="field-hint" role="status"></div>
+    <form id="generation-form" onsubmit="saveGeneration(event)">
+      <div id="generation-models"></div>
+      <div class="modal-foot">
+        <button type="button" id="generation-reset" class="btn-sec" onclick="resetGeneration()">Use model defaults</button>
+        <button type="button" class="btn-sec" onclick="closeOverlay('generation-overlay')">Cancel</button>
+        <button type="submit" id="generation-save" class="btn-pri">Save</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -312,11 +355,72 @@ let turnIdx = 0;
 let cardState = {};   // key: `${turnIdx}-${modelId}` → {text, startTime, interval}
 
 let orAllModels = [];
+let generationSettings = {};
+try { generationSettings = JSON.parse(localStorage.getItem('generation_settings') || '{}') || {}; } catch {}
+let generationModels = [];
+
+async function loadCatalog() {
+  const response = await fetch('/api/openrouter-models');
+  if (!response.ok) throw new Error('Model details unavailable. Retry by reopening Model settings.');
+  orAllModels = ((await response.json()).data || []).sort((a,b) => a.name.localeCompare(b.name));
+}
+
+async function openGeneration() {
+  generationModels = Object.values(groups).flatMap(g => g.models).filter(m => selected.has(m.id));
+  document.getElementById('generation-overlay').classList.add('open');
+  document.getElementById('generation-models').innerHTML = '';
+  document.getElementById('generation-save').disabled = true;
+  document.getElementById('generation-reset').disabled = true;
+  const status = document.getElementById('generation-status');
+  status.textContent = 'Loading model details…';
+  let failure = '';
+  if (generationModels.some(m => m.provider === 'openrouter')) {
+    try { await loadCatalog(); } catch(e) { failure = e.message; }
+  }
+  status.textContent = failure || (generationModels.length ? 'Settings are saved separately for each selected model.' : 'Select a model in the sidebar first.');
+  document.getElementById('generation-models').innerHTML = generationModels.map((model, index) => {
+    const metadata = model.provider === 'openrouter' && !failure ? orAllModels.find(m => m.id === model.model) : null;
+    const values = generationSettings[model.id] || {};
+    const fields = [
+      ['temperature', 'Temperature', 0, 2, 'any'],
+      ['top_p', 'Top-p', 0.000001, 1, 'any'],
+      ['max_tokens', 'Output limit (tokens)', 1, metadata?.top_provider?.max_completion_tokens || '', 1]
+    ].map(([key, label, min, max, step]) => {
+      const unknown = model.provider === 'openrouter' && !metadata;
+      const unsupported = metadata && Array.isArray(metadata.supported_parameters) && !metadata.supported_parameters.includes(key);
+      const disabled = unknown || unsupported;
+      const published = metadata?.default_parameters?.[key];
+      const hint = unknown ? 'Details unavailable; defaults only' : unsupported ? 'Not supported by this model' : key === 'max_tokens' ? (max ? `Advertised maximum: ${Number(max).toLocaleString()}. Available space also depends on conversation length.` : 'Provider default; maximum not published') : (published != null ? `Published default: ${published}` : 'Provider default (not published)');
+      return `<label for="gen-${index}-${key}">${label}<input id="gen-${index}-${key}" data-model-index="${index}" data-parameter="${key}" type="number" min="${min}" ${max !== '' ? `max="${max}"` : ''} step="${step}" placeholder="${published != null ? `Default: ${esc(published)}` : 'Model default'}" value="${disabled ? '' : esc(values[key] ?? '')}" ${disabled ? 'disabled' : ''}><small>${hint}</small></label>`;
+    }).join('');
+    return `<section class="generation-card"><h3>${esc(model.name)}</h3><div class="generation-fields">${fields}</div></section>`;
+  }).join('');
+  document.getElementById('generation-save').disabled = false;
+  document.getElementById('generation-reset').disabled = false;
+}
+
+function resetGeneration() {
+  document.querySelectorAll('#generation-form input').forEach(input => { input.value = ''; });
+}
+
+function saveGeneration(event) {
+  event.preventDefault();
+  generationModels.forEach(model => { generationSettings[model.id] = {}; });
+  document.querySelectorAll('#generation-form input').forEach(input => {
+    if (!input.disabled && input.value !== '') {
+      generationSettings[generationModels[Number(input.dataset.modelIndex)].id][input.dataset.parameter] = Number(input.value);
+    }
+  });
+  localStorage.setItem('generation_settings', JSON.stringify(generationSettings));
+  closeOverlay('generation-overlay');
+  saveChat();
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   updateKeyDot();
   await Promise.all([loadConfigModels(), refreshLocal()]);
+  restoreChats();
 }
 
 async function loadConfigModels() {
@@ -391,10 +495,11 @@ function renderSidebar() {
 }
 
 function toggleGroup(key) { groups[key].open = !groups[key].open; renderSidebar(); }
-function toggleModel(id, on) { on ? selected.add(id) : selected.delete(id); renderSidebar(); }
+function toggleModel(id, on) { on ? selected.add(id) : selected.delete(id); renderSidebar(); saveChat(); }
 function selectGroup(key, on) {
   groups[key].models.forEach(m => on ? selected.add(m.id) : selected.delete(m.id));
   renderSidebar();
+  saveChat();
 }
 async function removeOrModel(e, id) {
   e.preventDefault(); e.stopPropagation();
@@ -411,8 +516,7 @@ async function openBrowser() {
     document.getElementById('browser-tbody').innerHTML =
       '<tr class="loading-row"><td colspan="4">Loading…</td></tr>';
     try {
-      const r = await fetch('https://openrouter.ai/api/v1/models');
-      orAllModels = ((await r.json()).data || []).sort((a,b) => a.name.localeCompare(b.name));
+      await loadCatalog();
     } catch(e) {
       document.getElementById('browser-tbody').innerHTML =
         `<tr class="loading-row"><td colspan="4">Failed: ${esc(String(e))}</td></tr>`;
@@ -526,15 +630,17 @@ function updateSysBadge() {
 
 // ── Conversation ──────────────────────────────────────────────────────────────
 function newConversation() {
+  if (running || !saveChat()) return;
+  activeChatId = null;
   turns = [];
   turnIdx = 0;
   cardState = {};
-  const conv = document.getElementById('conversation');
-  conv.innerHTML = `<div class="empty-state" id="empty-state">
-    <div class="big">⚡</div>
-    <div>Select models in the sidebar, then type a prompt below</div>
-  </div>`;
   document.getElementById('prompt').value = '';
+  document.getElementById('sys-prompt').value = '';
+  updateSysBadge();
+  localStorage.removeItem('arena_active_chat');
+  renderConversation();
+  renderChats();
 }
 
 function handleKey(e) {
@@ -544,6 +650,7 @@ function handleKey(e) {
 // ── Compare / streaming ───────────────────────────────────────────────────────
 async function runCompare() {
   if (running) return;
+  document.getElementById('send-error').textContent = '';
   const prompt = document.getElementById('prompt').value.trim();
   if (!prompt) return;
   const allModels = Object.values(groups).flatMap(g => g.models);
@@ -568,6 +675,9 @@ async function runCompare() {
   const turn = { id: tid, userMessage: prompt, models: active, responses: {} };
   active.forEach(m => { turn.responses[m.id] = { text: '' }; });
   turns.push(turn);
+  active.forEach(m => { turn.responses[m.id].status = "streaming"; });
+  saveChat();
+  renderChats();
 
   // Remove empty state
   const emptyState = document.getElementById('empty-state');
@@ -631,8 +741,13 @@ async function runCompare() {
     const res = await fetch('/api/compare', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, history, models: active, system_prompt: systemPrompt, openrouter_key: orKey }),
+      body: JSON.stringify({ prompt, history, models: active, system_prompt: systemPrompt, openrouter_key: orKey,
+        parameters: Object.fromEntries(active.map(m => [m.id, generationSettings[m.id] || {}])) }),
     });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(typeof detail.detail === 'string' ? detail.detail : `Request rejected (HTTP ${res.status}). Check Model settings.`);
+    }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -653,25 +768,47 @@ async function runCompare() {
         if (error) {
           stopTimer(model_id); if(dot) dot.className='rdot error';
           if(body) body.innerHTML=`<span class="error-msg">Error: ${esc(error)}</span>`;
-          if(turn.responses[model_id]) turn.responses[model_id].text = '';
+          if(turn.responses[model_id]) { turn.responses[model_id].error = error; turn.responses[model_id].status = 'error'; }
+          saveChat();
           continue;
         }
         if (content) {
           startTimer(model_id);
           cardState[key].text += content;
           turn.responses[model_id].text = cardState[key].text;
+          scheduleChatSave();
           if(body) { body.innerHTML=`<span class="raw-text">${esc(cardState[key].text)}</span><span class="cursor"></span>`; body.scrollTop=body.scrollHeight; }
           conv.scrollTop = conv.scrollHeight;
         }
         if (mdone) {
           stopTimer(model_id); if(dot) dot.className='rdot done';
-          if(body) body.innerHTML = marked.parse(cardState[key].text || '');
+          turn.responses[model_id].status = 'done';
+          if(body) renderResponse(body, cardState[key].text || '');
+          saveChat();
         }
       }
     }
-  } catch(e) { console.error(e); }
+  } catch(e) {
+    document.getElementById('send-error').textContent = e.message;
+    document.getElementById('prompt').value = prompt;
+    active.forEach(m => stopTimer(m.id));
+    active.forEach(m => {
+      const response = turn.responses[m.id];
+      if (response.status === 'streaming') { response.status = 'interrupted'; response.error = e.message; }
+    });
+    renderConversation();
+  }
 
   running = false;
+  active.forEach(m => {
+    stopTimer(m.id);
+    if (turn.responses[m.id].status === 'streaming') {
+      turn.responses[m.id].status = 'interrupted';
+      turn.responses[m.id].error = 'Response interrupted before completion.';
+    }
+  });
+  saveChat();
+  renderChats();
   document.getElementById('run-btn').disabled = false;
   document.getElementById('prompt').focus();
 }
@@ -688,6 +825,164 @@ function copyCard(tid, mid) {
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// Saved chats use separate keys so another tab cannot overwrite the whole list.
+const CHAT_PREFIX = 'arena_chat_v1:';
+let activeChatId = null;
+let chatSaveTimer;
+let historyReady = false;
+function chatStatus(message) { document.getElementById('chat-status').textContent = message; }
+function savedChats() {
+  const chats = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key.startsWith(CHAT_PREFIX)) continue;
+    try {
+      const chat = JSON.parse(localStorage.getItem(key));
+      if (chat && typeof chat.id === 'string' && Array.isArray(chat.turns)) chats.push(chat);
+    } catch { chatStatus('A saved chat could not be read. Its stored data was kept.'); }
+  }
+  return chats.sort((a,b) => b.updatedAt - a.updatedAt);
+}
+function saveChat() {
+  clearTimeout(chatSaveTimer); chatSaveTimer = null;
+  if (!historyReady) return true;
+  const draft = document.getElementById('prompt').value;
+  const systemPrompt = document.getElementById('sys-prompt').value;
+  if (!activeChatId && !turns.length && !draft.trim() && !systemPrompt.trim()) return true;
+  const id = activeChatId || crypto.randomUUID();
+  const chat = { id, title: (turns[0]?.userMessage || draft || 'New chat').slice(0, 80),
+    updatedAt: Date.now(), turns, draft, systemPrompt, selected: [...selected],
+    parameters: generationSettings };
+  try {
+    localStorage.setItem(CHAT_PREFIX + id, JSON.stringify(chat));
+    localStorage.setItem('arena_active_chat', id);
+    activeChatId = id;
+    chatStatus('Saved in this browser.');
+    renderChats();
+    return true;
+  } catch {
+    chatStatus('Chat not saved: browser storage is full or unavailable. Keep this page open.');
+    return false;
+  }
+}
+function scheduleChatSave() {
+  if (!chatSaveTimer) chatSaveTimer = setTimeout(() => { chatSaveTimer = null; saveChat(); }, 500);
+}
+function renderChats() {
+  const list = document.getElementById('chat-list');
+  list.replaceChildren();
+  try {
+    const chats = savedChats();
+    if (!chats.length) list.textContent = 'No saved chats yet.';
+    for (const chat of chats) {
+      const button = document.createElement('button');
+      button.className = 'chat-entry' + (chat.id === activeChatId ? ' active' : '');
+      button.disabled = running;
+      button.setAttribute('aria-current', chat.id === activeChatId ? 'true' : 'false');
+      const title = document.createElement('span'); title.textContent = chat.title;
+      const date = document.createElement('small'); date.textContent = new Date(chat.updatedAt).toLocaleString();
+      button.append(title, date);
+      button.onclick = () => openChat(chat.id);
+      list.append(button);
+    }
+  } catch { chatStatus('Browser storage is unavailable; chats cannot be saved.'); }
+  document.getElementById('new-chat').disabled = running;
+  document.getElementById('delete-chat').disabled = running || !activeChatId;
+}
+function restoreChats() {
+  historyReady = true;
+  try {
+    const id = localStorage.getItem('arena_active_chat');
+    if (id) openChat(id, false);
+  } catch { chatStatus('Browser storage is unavailable; chats cannot be saved.'); }
+  renderChats();
+}
+function openChat(id, saveCurrent = true) {
+  if (running || (saveCurrent && !saveChat())) return;
+  try {
+    const raw = localStorage.getItem(CHAT_PREFIX + id);
+    if (!raw) { chatStatus('This chat was deleted in another tab.'); renderChats(); return; }
+    const chat = JSON.parse(raw);
+    if (!Array.isArray(chat.turns)) throw new Error('Invalid chat');
+    activeChatId = id;
+    turns = chat.turns;
+    turnIdx = Math.max(0, ...turns.map(t => t.id));
+    cardState = {};
+    for (const turn of turns) for (const response of Object.values(turn.responses)) {
+      if (response.status === 'streaming') { response.status = 'interrupted'; response.error = 'Response interrupted when the page was closed.'; }
+    }
+    selected = new Set(chat.selected || []);
+    generationSettings = chat.parameters || {};
+    document.getElementById('prompt').value = chat.draft || '';
+    document.getElementById('sys-prompt').value = chat.systemPrompt || '';
+    document.getElementById('send-error').textContent = '';
+    updateSysBadge();
+    localStorage.setItem('arena_active_chat', id);
+    renderSidebar(); renderConversation(); renderChats();
+  } catch { chatStatus('This chat could not be opened. Its stored data was kept.'); }
+}
+function deleteConversation() {
+  if (running || !activeChatId) return;
+  if (!confirm('Delete this chat and its messages? This cannot be undone.')) return;
+  try {
+    localStorage.removeItem(CHAT_PREFIX + activeChatId);
+    localStorage.removeItem('arena_active_chat');
+  } catch { chatStatus('The chat could not be deleted from browser storage.'); return; }
+  clearTimeout(chatSaveTimer); chatSaveTimer = null;
+  activeChatId = null; turns = []; turnIdx = 0; cardState = {};
+  document.getElementById('prompt').value = '';
+  document.getElementById('sys-prompt').value = '';
+  updateSysBadge();
+  renderConversation(); renderChats(); chatStatus('Chat deleted.');
+}
+function renderResponse(body, text) {
+  // Saved model output must never execute HTML or script when reopened.
+  if (typeof marked === 'undefined') { body.textContent = text; body.classList.add('raw-text'); return; }
+  const doc = new DOMParser().parseFromString(marked.parse(text), 'text/html');
+  const allowed = new Set(['P','BR','STRONG','EM','DEL','CODE','PRE','UL','OL','LI','BLOCKQUOTE','H1','H2','H3','H4','H5','H6','TABLE','THEAD','TBODY','TR','TH','TD','HR','A']);
+  for (const el of [...doc.body.querySelectorAll('*')]) {
+    if (!allowed.has(el.tagName)) { el.replaceWith(doc.createTextNode(el.textContent)); continue; }
+    const href = el.tagName === 'A' ? el.getAttribute('href') : null;
+    for (const attr of [...el.attributes]) el.removeAttribute(attr.name);
+    if (href && /^(https?:|mailto:)/i.test(href)) { el.setAttribute('href', href); el.setAttribute('rel', 'noopener noreferrer'); }
+  }
+  body.replaceChildren(...doc.body.childNodes);
+}
+function renderConversation() {
+  const conv = document.getElementById('conversation');
+  conv.replaceChildren();
+  if (!turns.length) {
+    conv.innerHTML = '<div class="empty-state" id="empty-state"><div class="big">⚡</div><div>Select models in the sidebar, then type a prompt below</div></div>';
+    return;
+  }
+  for (const turn of turns) {
+    const element = document.createElement('div'); element.className = 'turn';
+    const user = document.createElement('div'); user.className = 'user-msg';
+    const tag = document.createElement('span'); tag.className = 'you-tag'; tag.textContent = 'You';
+    const prompt = document.createElement('div'); prompt.className = 'user-text'; prompt.textContent = turn.userMessage;
+    user.append(tag, prompt); element.append(user);
+    const grid = document.createElement('div'); grid.className = 'turn-grid';
+    for (const model of turn.models) {
+      const response = turn.responses[model.id] || {};
+      const card = document.createElement('div'); card.className = 'card';
+      const head = document.createElement('div'); head.className = 'card-head'; head.textContent = model.name;
+      const body = document.createElement('div'); body.className = 'card-body'; renderResponse(body, response.text || '');
+      if (response.error) { const error = document.createElement('p'); error.className = 'error-msg'; error.textContent = response.error; body.append(error); }
+      const foot = document.createElement('div'); foot.className = 'card-foot';
+      const copy = document.createElement('button'); copy.className = 'copy-btn'; copy.textContent = 'Copy';
+      copy.onclick = () => navigator.clipboard.writeText(response.text || ''); foot.append(copy);
+      card.append(head, body, foot); grid.append(card);
+    }
+    element.append(grid); conv.append(element);
+  }
+  conv.scrollTop = conv.scrollHeight;
+}
+document.getElementById('prompt').addEventListener('input', scheduleChatSave);
+document.getElementById('sys-prompt').addEventListener('input', scheduleChatSave);
+window.addEventListener('pagehide', saveChat);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveChat(); });
+window.addEventListener('storage', event => { if (event.key?.startsWith(CHAT_PREFIX)) renderChats(); });
 
 init();
 </script>
